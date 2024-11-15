@@ -5,7 +5,7 @@ import cv2
 # Define tweak flags for NetGear client
 options = {"flag": 0, "copy": True, "track": False}
 
-# Define Netgear Client to receive frames from the Raspberry Pi
+# Define NetGear Client to receive frames from the Raspberry Pi
 client = NetGear(
     address="192.168.82.35",
     port="5454",
@@ -25,7 +25,7 @@ while True:
     if frame is None:
         break
 
-    # Display the received frame
+    # Display the frame without flipping
     cv2.imshow("Output Frame", frame)
 
     # Check for 'q' key to break the loop

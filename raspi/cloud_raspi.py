@@ -1,12 +1,40 @@
+import RPi.GPIO as GPIO
+from gpiozero import Servo
+from time import sleep, time
 import cv2
 from picamera2 import Picamera2
 from vidgear.gears import NetGear
 import socket
 import struct
 import threading
-import RPi.GPIO as GPIO
-from gpiozero import Servo
-from time import sleep
+
+# Configuration Variables
+CONFIDENCE_THRESHOLD = 80  # Set the threshold for triggering the alarm
+activation_time = 4        # Time in seconds the alarm will stay active
+cooldown_period = 1        # Cooldown period in seconds
+last_activation_time = 0   # Store the time of the last alarm activation
+
+# GPIO Pin Definitions
+RED_LED_PIN = 16    # Output LED Merah (Kuning)
+GREEN_LED_PIN = 22  # Output LED Hijau
+BUZZER_PIN1 = 17    # Output Buzzer 1
+BUZZER_PIN2 = 24    # Output Buzzer 2
+SERVO_PIN = 12      # Pin for Servo motor
+
+# Setup GPIO mode and pins
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(RED_LED_PIN, GPIO.OUT)
+GPIO.setup(GREEN_LED_PIN, GPIO.OUT)
+GPIO.setup(BUZZER_PIN1, GPIO.OUT)
+GPIO.setup(BUZZER_PIN2, GPIO.OUT)
+
+# Setup Servo using gpiozero
+servo = Servo(SERVO_PIN)
+
+# Setup LED and Buzzers using PWM
+green_led = GPIO.PWM(GREEN_LED_PIN, 100)  # Using PWM for green LED (optional)
+buzzer1 = GPIO.PWM(BUZZER_PIN1, 1000)     # Using PWM for Buzzer 1
+buzzer2 = GPIO.PWM(BUZZER_PIN2, 1000)     # Using PWM for Buzzer 2
 
 # Video Stream Setup
 options = {
@@ -20,141 +48,105 @@ options = {
 }
 server = NetGear(address="192.168.82.35", port="5454", protocol="tcp", pattern=1, logging=True, **options)
 
-# GPIO Setup for System 1
-GPIO.setmode(GPIO.BCM)
-GPIO.setup(16, GPIO.OUT)  # Pin for yellow LED (System 1)
-GPIO.setup(17, GPIO.OUT)  # Pin for buzzer (System 1)
-GPIO.setup(22, GPIO.OUT)  # Pin for green LED (System 1)
-
-# Setup for System 1 Components
-servo1 = Servo(12)  # GPIO 12 for Servo (System 1)
-yellow_led1 = GPIO.PWM(16, 100)  # PWM for yellow LED (System 1)
-green_led1 = GPIO.PWM(22, 100)  # PWM for green LED (System 1)
-buzzer1 = GPIO.PWM(17, 1000)  # PWM for buzzer (System 1)
-
-# GPIO Setup for System 2
-GPIO.setup(23, GPIO.OUT)  # Pin for red LED (System 2)
-GPIO.setup(24, GPIO.OUT)  # Pin for buzzer (System 2)
-GPIO.setup(25, GPIO.OUT)  # Pin for green LED (System 2)
-
-# Setup for System 2 Components
-servo2 = Servo(13)  # GPIO 13 for Servo (System 2)
-red_led2 = GPIO.PWM(23, 100)  # PWM for red LED (System 2)
-green_led2 = GPIO.PWM(25, 100)  # PWM for green LED (System 2)
-buzzer2 = GPIO.PWM(24, 1000)  # PWM for buzzer (System 2)
-
-# Initial LED status
-green_led1.start(100)
-green_led2.start(100)
-
 # Message Socket Setup
 message_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 message_socket.bind(("0.0.0.0", 9999))
 message_socket.listen(5)
 print("Listening for messages on port 9999...")
 
-# Flags and global variables
-alarm_active = False
-latest_confidence_score = 0.0  # To store the latest confidence score
+# Flag to prevent multiple activations of the alarm
+alarm_triggered = False
 
+# Function to reset the alarm state
+def reset_alarm_state():
+    global alarm_triggered
+    GPIO.output(RED_LED_PIN, GPIO.LOW)
+    green_led.start(100)
+    buzzer1.stop()
+    buzzer2.stop()
+    servo.value = 1
+    sleep(0.1)
+    servo.detach()
+    GPIO.setup(BUZZER_PIN1, GPIO.IN)
+    GPIO.setup(BUZZER_PIN2, GPIO.IN)
+    alarm_triggered = False
+
+# Function to activate the alarm
+def activate_alarm():
+    global alarm_triggered, last_activation_time
+    if alarm_triggered:
+        return
+
+    alarm_triggered = True
+    print("Activating Alarm...")
+    GPIO.setup(BUZZER_PIN1, GPIO.OUT)
+    GPIO.setup(BUZZER_PIN2, GPIO.OUT)
+    servo.value = -1
+
+    start_time = time()
+    while time() - start_time < activation_time:
+        green_led.ChangeDutyCycle(0)
+        GPIO.output(RED_LED_PIN, GPIO.HIGH)
+        buzzer1.start(50)
+        buzzer2.start(50)
+        sleep(0.2)
+        buzzer1.stop()
+        buzzer2.stop()
+        sleep(0.2)
+        GPIO.output(RED_LED_PIN, GPIO.LOW)
+        buzzer1.start(50)
+        buzzer2.start(50)
+        sleep(0.2)
+        buzzer1.stop()
+        buzzer2.stop()
+        sleep(0.2)
+
+    reset_alarm_state()
+    last_activation_time = time()
+
+# Function to receive confidence scores and activate the alarm if a threshold is met
 def receive_confidence_scores():
-    global alarm_active, latest_confidence_score
-    """Function to receive confidence scores and set alarm if score is above threshold."""
+    global alarm_triggered, last_activation_time
     while True:
         client_socket, addr = message_socket.accept()
         print("Connected to:", addr)
         with client_socket:
             while True:
-                # Receive message length
                 message_length = client_socket.recv(struct.calcsize("Q"))
                 if not message_length:
                     break
                 message_size = struct.unpack("Q", message_length)[0]
-
-                # Receive and decode the confidence score message
                 message = client_socket.recv(message_size).decode()
+
                 try:
                     confidence_score = float(message)
-                    latest_confidence_score = confidence_score  # Update the latest confidence score
-                    if confidence_score > 0.5:
-                        alarm_active = True  # Set alarm if confidence is above 0.5
-                    else:
-                        alarm_active = False
+                    print("Confidence Score:", confidence_score)
+                    current_time = time()
+                    if confidence_score > CONFIDENCE_THRESHOLD and not alarm_triggered and (current_time - last_activation_time > cooldown_period):
+                        print("Confidence score exceeded threshold, activating alarm!")
+                        activate_alarm()
                 except ValueError:
                     print("Received non-numeric message:", message)
 
-def stream_video_frames():
-    """Function to capture and send video frames."""
-    picam2 = Picamera2()
-    picam2.start()
-    try:
-        while True:
-            frame = picam2.capture_array()
-            if frame is None:
-                break
-
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
-            server.send(frame_bgr)
-
-    finally:
-        picam2.stop()
-        server.close()
-
-def activate_alarm():
-    """Function to activate both alarm systems (LED, buzzer, and servo) when alarm is triggered."""
-    global alarm_active, latest_confidence_score
-    while True:
-        if alarm_active:
-            print(f"Confidence Score: {latest_confidence_score:.2f} - TERDETEKSI KERETA, ALARM AKTIF")
-
-            # Alarm active: System 1 (yellow LED, buzzer, servo) and System 2 (red LED, buzzer, servo) activate
-            for _ in range(6):  # Blink for 5 seconds (10 cycles of 0.5-second intervals)
-                green_led1.ChangeDutyCycle(0)  # Turn off green LED for System 1
-                green_led2.ChangeDutyCycle(0)  # Turn off green LED for System 2
-                
-                # Move servos to "close" position
-                servo1.value = -1
-                servo2.value = -1
-                sleep(0.5)
-                
-                # Activate System 1 alarm components
-                yellow_led1.start(100)  # Turn on yellow LED
-                buzzer1.start(50)  # Start buzzer for System 1
-                sleep(0.25)
-                
-                yellow_led1.stop()  # Turn off yellow LED for System 1
-                buzzer1.stop()  # Stop buzzer for System 1
-                sleep(0.25)
-                
-                # Activate System 2 alarm components
-                red_led2.start(100)  # Turn on red LED
-                buzzer2.start(50)  # Start buzzer for System 2
-                sleep(0.25)
-                
-                red_led2.stop()  # Turn off red LED for System 2
-                buzzer2.stop()  # Stop buzzer for System 2
-                sleep(0.25)
-
-            # Reset servos to initial position and green LEDs back on
-            servo1.value = 1
-            servo2.value = 1
-            sleep(0.5)
-            servo1.detach()  # Turn off PWM signal to servo for System 1
-            servo2.detach()  # Turn off PWM signal to servo for System 2
-            green_led1.ChangeDutyCycle(100)  # Turn green LED back on for System 1
-            green_led2.ChangeDutyCycle(100)  # Turn green LED back on for System 2
-
-            alarm_active = False  # Reset alarm flag after activation
-
-        sleep(0.1)  # Small delay to reduce CPU usage
-
 # Start the confidence score-receiving thread
-confidence_thread = threading.Thread(target=receive_confidence_scores, daemon=True)
-confidence_thread.start()
+threading.Thread(target=receive_confidence_scores, daemon=True).start()
 
-# Start the video frame streaming thread
-video_thread = threading.Thread(target=stream_video_frames, daemon=True)
-video_thread.start()
+# Initialize Picamera2
+picam2 = Picamera2()
+picam2.start()
 
-# Start the alarm activation loop
-activate_alarm()  # Runs continuously
+try:
+    while True:
+        frame = picam2.capture_array()
+        if frame is None:
+            break
+
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+        server.send(frame_bgr)
+
+finally:
+    picam2.stop()
+    server.close()
+    message_socket.close()
+    GPIO.cleanup()
+
